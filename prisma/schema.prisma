@@ -9,8 +9,125 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+//
+// ENUMS
+//
+enum SyncStatus {
+  OK
+  ERROR
+  AUTH_REQUIRED
+}
+
+//
+// MODELS
+//
+
 model User {
-  id    Int     @id @default(autoincrement())
-  email String  @unique
-  name  String?
+  id              String           @id @default(cuid())
+  email           String           @unique
+  name            String?
+  picture         String?
+  googleId        String           @unique
+
+  // relations
+  interests       UserInterest[]
+  customInterests CustomInterest[]
+  events          UserEvent[]
+  calendarSync    CalendarSync?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([googleId])
+}
+
+model Interest {
+  id       String          @id @default(cuid())
+  category String
+  child    String
+
+  users    UserInterest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([category, child]) // prevents duplicate definitions
+  @@index([category])
+}
+
+model UserInterest {
+  id         String   @id @default(cuid())
+  userId     String
+  interestId String
+
+  user       User     @relation(fields: [userId], references: [id])
+  interest   Interest @relation(fields: [interestId], references: [id])
+
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, interestId])
+  @@index([userId])
+}
+
+model CustomInterest {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, name]) 
+  @@index([userId])
+}
+
+model Event {
+  id          String      @id @default(cuid())
+  title       String
+  description String?
+  location    String?
+  platform    String?     
+  link        String?
+  startTime   DateTime
+  endTime     DateTime?
+  source      String?     
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  users       UserEvent[]
+
+  // prevents duplicates for same time/place
+  @@unique([title, startTime, location]) 
+  // optimize queries by time
+  @@index([startTime])
+}
+
+model UserEvent {
+  id      String @id @default(cuid())
+  userId  String
+  eventId String
+  added   Boolean @default(true)
+
+  user    User  @relation(fields: [userId], references: [id])
+  event   Event @relation(fields: [eventId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, eventId])
+  @@index([userId])
+  @@index([eventId])
+}
+
+model CalendarSync {
+  id                 String     @id @default(cuid())
+  userId             String     @unique
+  lastEmailFetch     DateTime?
+  lastCalendarUpdate DateTime?
+  syncStatus         SyncStatus @default(OK)
+  errorMessage       String?
+
+  user               User       @relation(fields: [userId], references: [id])
+
+  updatedAt          DateTime   @updatedAt
 }

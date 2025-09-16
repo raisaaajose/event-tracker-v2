@@ -103,10 +103,73 @@ uv run uvicorn app.main:app --reload
 
 The application uses PostgreSQL with Prisma ORM. The database schema is defined in `prisma/schema.prisma`.
 
+### Database Migrations
+
+The project includes a dedicated migration service for managing database schema changes.
+
+#### Using the Migration Service
+
+**Start the database:**
+
+```bash
+docker-compose up db -d
+```
+
+**Run migrations:**
+
+```bash
+# Apply pending migrations
+docker-compose --profile tools run --rm migrate
+
+# Or use the migration scripts:
+# Linux/macOS:
+./migrate.sh migrate:deploy
+
+# Windows:
+migrate.bat migrate:deploy
+```
+
+**Create a new migration:**
+
+```bash
+# Linux/macOS:
+./migrate.sh migrate:dev add_new_table
+
+# Windows:
+migrate.bat migrate:dev add_new_table
+```
+
+**Check migration status:**
+
+```bash
+# Linux/macOS:
+./migrate.sh migrate:status
+
+# Windows:
+migrate.bat migrate:status
+```
+
+**Other migration commands:**
+
+```bash
+# Generate Prisma client
+./migrate.sh generate        # Linux/macOS
+migrate.bat generate         # Windows
+
+# Reset database (WARNING: loses all data)
+./migrate.sh migrate:reset   # Linux/macOS
+migrate.bat migrate:reset    # Windows
+
+# Start Prisma Studio (database browser)
+./migrate.sh studio          # Linux/macOS
+migrate.bat studio           # Windows
+```
+
 ## Docker Services
 
 - **app**: FastAPI application (development mode with hot reload)
 - **db**: PostgreSQL 15 database
+- **migrate**: Database migration service (run with `--profile tools`)
 - **app-prod**: Production-ready FastAPI application (commented out by default)
 
 ## Environment Variables

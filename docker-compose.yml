@@ -3,6 +3,8 @@ services:
   db:
     image: postgres:15-alpine
     container_name: event-tracker-db
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: event_tracker
       POSTGRES_USER: postgres
@@ -19,14 +21,37 @@ services:
       timeout: 10s
       retries: 3
 
+  # Database Migration Service
+  migrate:
+    build:
+      context: .
+      target: development
+    container_name: event-tracker-migrate
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - event-tracker-network
+    volumes:
+      - .:/app
+    command: python -m prisma migrate deploy
+    profiles:
+      - tools
+
   # FastAPI Application
   app:
     build:
       context: .
       target: development
     container_name: event-tracker-app
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/event_tracker
+      DATABASE_URL: ${DATABASE_URL}
     ports:
       - "8000:8000"
     depends_on:
@@ -36,38 +61,7 @@ services:
       - event-tracker-network
     volumes:
       - .:/app
-    command: >
-      sh -c "
-        python -m prisma migrate deploy &&
-        python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-      "
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-  # Production version (uncomment to use)
-  # app-prod:
-  #   build:
-  #     context: .
-  #     target: production
-  #   container_name: event-tracker-app-prod
-  #   environment:
-  #     DATABASE_URL: postgresql://postgres:postgres@db:5432/event_tracker
-  #   ports:
-  #     - "8000:8000"
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   networks:
-  #     - event-tracker-network
-  #   command: >
-  #     sh -c "
-  #       python -m prisma migrate deploy &&
-  #       python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-  #     "
+    command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   postgres_data:

@@ -51,7 +51,7 @@ model Interest {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([category, child]) // prevents duplicate definitions
+  @@unique([category, child])
   @@index([category])
 }
 
@@ -78,7 +78,7 @@ model CustomInterest {
 
   createdAt DateTime @default(now())
 
-  @@unique([userId, name]) 
+  @@unique([userId, name])
   @@index([userId])
 }
 
@@ -91,16 +91,16 @@ model Event {
   link        String?
   startTime   DateTime
   endTime     DateTime?
-  source      String?     
+  source      String?     // e.g. "gmail"
+  sourceId    String?     // Gmail messageId for dedup/debug
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   users       UserEvent[]
 
-  // prevents duplicates for same time/place
-  @@unique([title, startTime, location]) 
-  // optimize queries by time
+  @@unique([title, startTime, location])
   @@index([startTime])
+  @@index([sourceId])
 }
 
 model UserEvent {
@@ -122,7 +122,7 @@ model UserEvent {
 model CalendarSync {
   id                 String     @id @default(cuid())
   userId             String     @unique
-  lastEmailFetch     DateTime?
+  lastProcessedDate  DateTime?  // Gmail internalDate cutoff
   lastCalendarUpdate DateTime?
   syncStatus         SyncStatus @default(OK)
   errorMessage       String?

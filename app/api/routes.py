@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from .auth import router as auth_router
 
 router = APIRouter()
 
@@ -16,3 +17,6 @@ async def ping():
 @router.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "Service is running"}
+
+
+router.include_router(auth_router)

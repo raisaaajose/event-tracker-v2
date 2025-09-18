@@ -34,7 +34,7 @@ services:
       - event-tracker-network
     volumes:
       - .:/app
-    command: python -m prisma migrate deploy
+    command: python -m prisma migrate dev
     profiles:
       - tools
 

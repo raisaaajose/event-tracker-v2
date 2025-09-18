@@ -8,6 +8,7 @@ A FastAPI-based event tracking application with PostgreSQL database support.
 - PostgreSQL database with Prisma ORM
 - Docker containerization
 - Development and production configurations
+- Google OAuth2 login (prepared) with Gmail read + Calendar events scopes
 
 ## Quick Start with Docker
 
@@ -25,13 +26,13 @@ git clone <repository-url>
 cd event-tracker-v2
 ```
 
-2. Copy the environment file:
+1. Copy the environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-3. Start the application with Docker Compose:
+1. Start the application with Docker Compose:
 
 ```bash
 docker-compose up --build
@@ -67,30 +68,99 @@ docker-compose up app-prod db --build
 uv sync
 ```
 
-2. Set up environment variables:
+1. Set up environment variables:
 
 ```bash
 cp .env.example .env
 # Edit .env with your database configuration
 ```
 
-3. Generate Prisma client:
+1. Generate Prisma client:
 
 ```bash
 uv run prisma generate
 ```
 
-4. Run database migrations:
+1. Run database migrations:
 
 ```bash
 uv run prisma migrate deploy
 ```
 
-5. Start the development server:
+1. Start the development server:
 
-```bash
+````bash
 uv run uvicorn app.main:app --reload
+
+## Google OAuth2
+
+This project includes endpoints to authenticate users with Google and persist OAuth tokens for future Gmail reading and Calendar event updates.
+
+### Scopes
+
+We request these scopes:
+
+- openid, email, profile
+- https://www.googleapis.com/auth/gmail.readonly
+- https://www.googleapis.com/auth/calendar.events
+
+You can adjust scopes in `app/services/google_oauth.py`.
+
+### Google Cloud Console Setup
+
+1. Create a project at <https://console.cloud.google.com/>
+2. Configure OAuth consent screen:
+	- User type: External (for testing) or Internal as appropriate
+	- Add the above scopes
+	- Add test users (emails) if app is not published
+3. Create OAuth 2.0 Client ID (type: Web application):
+	- Authorized redirect URIs:
+	  - <http://localhost:8000/auth/google/callback>
+	- Optional: Authorized JavaScript origins for your frontend
+4. Copy the client credentials into `.env`:
+
+```env
+GOOGLE_CLIENT_ID=your_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
+FRONTEND_URL=http://localhost:5173
+````
+
+### Database Migration (GoogleAccount)
+
+We store OAuth tokens in a `GoogleAccount` table linked to `User`.
+
+Run migrations to apply the new schema:
+
+```powershell
+# Using Docker
+docker-compose --profile tools run --rm migrate python -m prisma migrate deploy
+
+# Or locally (ensure DB is running and env is set)
+python -m prisma generate
+python -m prisma migrate deploy
 ```
+
+### Endpoints
+
+- `GET /auth/google/login` → Redirects to Google OAuth consent
+- `GET /auth/google/callback` → Handles Google callback, upserts user and tokens
+
+On success, if `FRONTEND_URL` is set, the API redirects there with `?login=success&user_id=<id>`; otherwise, it returns a JSON payload with basic user info.
+
+### Using Tokens for Gmail/Calendar
+
+Use the helper in `app/services/google_api.py` to retrieve a valid (auto-refreshed) access token:
+
+```python
+from app.services.google_api import get_user_google_token
+token = await get_user_google_token(user_id)
+# token['access_token'] usable with Google APIs via httpx or google-api-python-client
+```
+
+Future endpoints can leverage this to read Gmail messages and create/update Calendar events.
+
+````
 
 ## API Endpoints
 
@@ -113,7 +183,7 @@ The project includes a dedicated migration service for managing database schema 
 
 ```bash
 docker-compose up db -d
-```
+````
 
 **Run migrations:**
 

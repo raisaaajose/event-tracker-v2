@@ -12,8 +12,7 @@ GOOGLE_REDIRECT_URI = config(
     default="http://localhost:8000/auth/google/callback",
 )
 
-# Scopes: Gmail read + Calendar read/write basic events
-# Reference: https://developers.google.com/identity/protocols/oauth2/scopes
+
 GOOGLE_SCOPES = [
     "openid",
     "email",

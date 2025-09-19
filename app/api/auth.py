@@ -7,6 +7,8 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 from app.core.db import db
 from app.services.google_oauth import oauth, GOOGLE_REDIRECT_URI
+from app.services.queue import job_queue
+from app.services.email_sync import schedule_periodic_sync
 
 router = APIRouter(prefix="/auth/google", tags=["auth"])
 
@@ -80,8 +82,9 @@ async def google_callback(request: Request):
                 detail="Google profile missing required fields",
             )
 
-        user: Any = await db.user.find_unique(where={"googleId": google_sub})
-        if user is None:
+        user = await db.user.find_unique(where={"googleId": google_sub})
+        is_new_user = user is None
+        if is_new_user:
             user = await db.user.create(
                 data={
                     "googleId": google_sub,
@@ -100,6 +103,12 @@ async def google_callback(request: Request):
                 },
             )
 
+        assert user is not None
+        user_id = user.id
+        user_email = user.email
+        user_name = user.name
+        user_picture = user.picture
+
         expires_at = None
         if isinstance(token, dict):
             expires_at = _epoch_to_datetime(token.get("expires_at"))
@@ -114,11 +123,11 @@ async def google_callback(request: Request):
                 except Exception:
                     expires_at = None
 
-        account = await db.googleaccount.find_unique(where={"userId": user.id})
+        account = await db.googleaccount.find_unique(where={"userId": user_id})
         if account is None:
             await db.googleaccount.create(
                 data={
-                    "userId": user.id,
+                    "userId": user_id,
                     "accessToken": str(token.get("access_token")),
                     "refreshToken": str(token.get("refresh_token")),
                     "expiresAt": expires_at,
@@ -141,20 +150,31 @@ async def google_callback(request: Request):
                 },
             )
 
+        if is_new_user:
+            await job_queue.put(
+                {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+            )
+
+            import asyncio
+
+            asyncio.create_task(
+                schedule_periodic_sync(user_id, interval_seconds=3600, max_results=10)
+            )
+
         import os
 
         frontend = os.environ.get("FRONTEND_URL")
         if frontend:
-            return RedirectResponse(url=f"{frontend}?login=success&user_id={user.id}")
+            return RedirectResponse(url=f"{frontend}?login=success&user_id={user_id}")
 
         return JSONResponse(
             {
                 "message": "Google authentication successful",
                 "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "name": user.name,
-                    "picture": user.picture,
+                    "id": user_id,
+                    "email": user_email,
+                    "name": user_name,
+                    "picture": user_picture,
                 },
             }
         )

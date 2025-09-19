@@ -126,7 +126,6 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
         emails=email_models,
     )
 
-    
     from app.services.queue import job_queue
 
     await job_queue.put(
@@ -199,7 +198,6 @@ async def handle_job(job: Dict[str, Any]) -> None:
                 }
             )
 
-        
         if latest_internal is not None:
             await db.calendarsync.upsert(
                 where={"userId": user_id},

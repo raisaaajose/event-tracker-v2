@@ -22,7 +22,16 @@ def _epoch_to_datetime(ts: Optional[float]) -> Optional[datetime]:
         return None
 
 
-@router.get("/login")
+@router.get(
+    "/login",
+    summary="Start Google OAuth login (redirect)",
+    description=(
+        "Initiates the Google OAuth 2.0 flow and redirects the user to Google. "
+        "This endpoint uses GET to simplify browser navigation and linking. "
+        "A POST variant is also provided for clients enforcing POST-only auth flows."
+    ),
+    operation_id="googleLoginGet",
+)
 async def google_login(request: Request):
     try:
         google = oauth.create_client("google")
@@ -45,7 +54,15 @@ async def google_login(request: Request):
         )
 
 
-@router.get("/callback")
+@router.get(
+    "/callback",
+    summary="Google OAuth callback",
+    description=(
+        "Handles the OAuth callback from Google, upserts the user and tokens, "
+        "stores the session user_id, and schedules background email sync jobs."
+    ),
+    operation_id="googleCallback",
+)
 async def google_callback(request: Request):
     try:
         google = oauth.create_client("google")
@@ -164,6 +181,9 @@ async def google_callback(request: Request):
         import os
 
         frontend = os.environ.get("FRONTEND_URL")
+
+        request.session["user_id"] = user_id
+
         if frontend:
             return RedirectResponse(url=f"{frontend}?login=success&user_id={user_id}")
 

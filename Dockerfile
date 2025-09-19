@@ -46,15 +46,22 @@ COPY . .
 # Generate Prisma client as root so package writes are permitted
 RUN python -m prisma generate
 
-# Create non-root user and prepare writable cache; copy any generated cache
+# Extract Prisma query engine to an app-owned location and make executable
+RUN set -eux; \
+    ENGINE_FILE="$(find /root/.cache/prisma-python -type f -name 'query-engine-*' | head -n1)"; \
+    mkdir -p /app/.prisma; \
+    cp "$ENGINE_FILE" /app/.prisma/query-engine; \
+    chmod +x /app/.prisma/query-engine
+
+# Create non-root user and prepare writable dirs
 RUN adduser --disabled-password --gecos '' appuser && \
     mkdir -p /home/appuser/.cache && \
-    if [ -d "/root/.cache" ]; then cp -r /root/.cache/* /home/appuser/.cache/ || true; fi && \
     chown -R appuser:appuser /home/appuser /app
 
 # Switch to non-root user and set cache dir so prisma uses a writable location
 USER appuser
-ENV XDG_CACHE_HOME=/home/appuser/.cache
+ENV XDG_CACHE_HOME=/home/appuser/.cache \
+    PRISMA_QUERY_ENGINE_BINARY=/app/.prisma/query-engine
 
 # Expose port
 EXPOSE 8000

@@ -43,17 +43,18 @@ FROM base AS production
 # Copy source code
 COPY . .
 
-# Create non-root user and writable cache dir
+# Generate Prisma client as root so package writes are permitted
+RUN python -m prisma generate
+
+# Create non-root user and prepare writable cache; copy any generated cache
 RUN adduser --disabled-password --gecos '' appuser && \
     mkdir -p /home/appuser/.cache && \
+    if [ -d "/root/.cache" ]; then cp -r /root/.cache/* /home/appuser/.cache/ || true; fi && \
     chown -R appuser:appuser /home/appuser /app
 
-# Switch to non-root user and set cache dir so prisma stores binaries here
+# Switch to non-root user and set cache dir so prisma uses a writable location
 USER appuser
 ENV XDG_CACHE_HOME=/home/appuser/.cache
-
-# Generate Prisma client as appuser so binaries land in a writable location
-RUN python -m prisma generate
 
 # Expose port
 EXPOSE 8000

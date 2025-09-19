@@ -8,6 +8,15 @@ import httpx
 
 from app.core.db import db
 from app.services.google_api import get_user_google_token
+from app.model.llm import (
+    EmailHeader,
+    EmailMessage,
+    LLMExtractionInput,
+    LLMExtractionOutput,
+    ProposedEvent,
+)
+from app.services.google_calendar import create_event
+from app.services.llm_client import extract_events
 
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -45,7 +54,7 @@ async def get_message_detail(user_id: str, message_id: str) -> Dict[str, Any]:
             },
         )
         resp.raise_for_status()
-        return resp.json()
+    return resp.json()
 
 
 def _parse_internal_date(ms_str: Optional[str]) -> Optional[datetime]:
@@ -61,7 +70,7 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
     if not messages:
         return 0
 
-    created = 0
+    email_models: List[EmailMessage] = []
     latest_internal: Optional[datetime] = None
     for m in messages:
         msg_id = m.get("id")
@@ -75,44 +84,61 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
             continue
 
         detail = await get_message_detail(user_id, msg_id)
-        subject = ""
-        headers = detail.get("payload", {}).get("headers", [])
-        for h in headers:
-            if h.get("name", "").lower() == "subject":
-                subject = h.get("value", "")
-                break
+        headers_raw = detail.get("payload", {}).get("headers", [])
+        headers = [
+            EmailHeader(name=h.get("name", ""), value=h.get("value", ""))
+            for h in headers_raw
+        ]
+        subject = next((h.value for h in headers if h.name.lower() == "subject"), None)
+        sender = next((h.value for h in headers if h.name.lower() == "from"), None)
+        to_addr = next((h.value for h in headers if h.name.lower() == "to"), None)
+        date_hdr = next((h.value for h in headers if h.name.lower() == "date"), None)
         internal_date = _parse_internal_date(detail.get("internalDate"))
         if internal_date and (
             latest_internal is None or internal_date > latest_internal
         ):
             latest_internal = internal_date
 
-        await db.event.create(
-            data={
-                "title": subject or "(no subject)",
-                "description": None,
-                "location": None,
-                "platform": "gmail",
-                "link": None,
-                "startTime": internal_date or datetime.now(timezone.utc),
-                "endTime": None,
-                "source": "gmail",
-                "sourceId": msg_id,
-                "users": {"create": [{"userId": user_id, "added": True}]},
-            }
-        )
-        created += 1
-
-    if latest_internal is not None:
-        await db.calendarsync.upsert(
-            where={"userId": user_id},
-            data={
-                "create": {"userId": user_id, "lastProcessedDate": latest_internal},
-                "update": {"lastProcessedDate": latest_internal},
-            },
+        email_models.append(
+            EmailMessage(
+                id=msg_id,
+                subject=subject,
+                sender=sender,
+                to=to_addr,
+                date=date_hdr,
+                snippet=detail.get("snippet"),
+                internal_date=internal_date,
+                headers=headers,
+            )
         )
 
-    return created
+    interests = await db.interest.find_many(
+        where={"users": {"some": {"userId": user_id}}}
+    )
+    interest_names = [f"{i.category}:{i.child}" for i in interests]
+    custom = await db.custominterest.find_many(where={"userId": user_id})
+    custom_names = [c.name for c in custom]
+
+    llm_input = LLMExtractionInput(
+        user_id=user_id,
+        interests=interest_names,
+        custom_interests=custom_names,
+        emails=email_models,
+    )
+
+    
+    from app.services.queue import job_queue
+
+    await job_queue.put(
+        {
+            "type": "process_llm_and_calendar",
+            "user_id": user_id,
+            "payload": llm_input.model_dump(),
+            "latest_internal": latest_internal.isoformat() if latest_internal else None,
+        }
+    )
+
+    return 0
 
 
 async def sync_user_inbox_once(user_id: str, max_results: int = 10) -> int:
@@ -135,6 +161,53 @@ async def handle_job(job: Dict[str, Any]) -> None:
         user_id = job["user_id"]
         max_results = int(job.get("max_results", 10))
         await sync_user_inbox_once(user_id, max_results=max_results)
+    elif kind == "process_llm_and_calendar":
+        user_id = job["user_id"]
+        payload = job.get("payload") or {}
+        latest_internal_iso = job.get("latest_internal")
+        latest_internal = None
+        if isinstance(latest_internal_iso, str):
+            try:
+                latest_internal = datetime.fromisoformat(latest_internal_iso)
+            except Exception:
+                latest_internal = None
+
+        llm_input = LLMExtractionInput.model_validate(payload)
+        llm_output = await extract_events(llm_input)
+
+        for ev in llm_output.events:
+            cal_ev = await create_event(
+                user_id=user_id,
+                summary=ev.title,
+                description=ev.description,
+                location=ev.location,
+                start=ev.start_time,
+                end=ev.end_time,
+            )
+            await db.event.create(
+                data={
+                    "title": ev.title,
+                    "description": ev.description,
+                    "location": ev.location,
+                    "platform": "google-calendar",
+                    "link": cal_ev.get("htmlLink"),
+                    "startTime": ev.start_time,
+                    "endTime": ev.end_time,
+                    "source": "gmail",
+                    "sourceId": ev.source_message_id,
+                    "users": {"create": [{"userId": user_id, "added": True}]},
+                }
+            )
+
+        
+        if latest_internal is not None:
+            await db.calendarsync.upsert(
+                where={"userId": user_id},
+                data={
+                    "create": {"userId": user_id, "lastProcessedDate": latest_internal},
+                    "update": {"lastProcessedDate": latest_internal},
+                },
+            )
 
 
 async def schedule_periodic_sync(

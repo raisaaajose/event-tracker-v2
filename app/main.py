@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,7 @@ tags_metadata = [
 
 
 def create_app() -> FastAPI:
+    load_dotenv(override=False)
     app = FastAPI(
         title="Event Tracker API",
         version="0.1.0",
@@ -68,17 +70,6 @@ def create_app() -> FastAPI:
     elif same_site == "strict":
         samesite_literal = "strict"
 
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=secret_key,
-        session_cookie=session_cookie,
-        max_age=max_age,
-        same_site=samesite_literal,
-        https_only=https_only,
-        domain=session_domain,
-        path="/",
-    )
-
     frontend_url = os.getenv("FRONTEND_URL")
     frontend_origin = None
     if frontend_url:
@@ -103,15 +94,22 @@ def create_app() -> FastAPI:
     app.add_middleware(
         RequireSessionUserMiddleware,
         exempt_paths=(
-            "/",
-            "/ping",
-            "/health",
             "/auth/",
             "/docs",
             "/redoc",
             "/openapi.json",
             "/favicon.ico",
         ),
+    )
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=secret_key,
+        session_cookie=session_cookie,
+        max_age=max_age,
+        same_site=samesite_literal,
+        https_only=https_only,
+        domain=session_domain,
+        path="/",
     )
     app.add_middleware(
         CORSMiddleware,

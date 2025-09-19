@@ -43,13 +43,17 @@ FROM base AS production
 # Copy source code
 COPY . .
 
-# Generate Prisma client
-RUN python -m prisma generate
-
-# Create non-root user
+# Create non-root user and writable cache dir
 RUN adduser --disabled-password --gecos '' appuser && \
-    chown -R appuser:appuser /app
+    mkdir -p /home/appuser/.cache && \
+    chown -R appuser:appuser /home/appuser /app
+
+# Switch to non-root user and set cache dir so prisma stores binaries here
 USER appuser
+ENV XDG_CACHE_HOME=/home/appuser/.cache
+
+# Generate Prisma client as appuser so binaries land in a writable location
+RUN python -m prisma generate
 
 # Expose port
 EXPOSE 8000

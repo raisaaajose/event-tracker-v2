@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import os
 
 import httpx
 
@@ -28,11 +29,9 @@ async def get_user_google_token(user_id: str) -> dict:
         and account.expiresAt <= datetime.now(timezone.utc)
         and account.refreshToken
     ):
-        from app.services.google_oauth import config
-
         data = {
-            "client_id": config("GOOGLE_CLIENT_ID"),
-            "client_secret": str(config("GOOGLE_CLIENT_SECRET")),
+            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
             "grant_type": "refresh_token",
             "refresh_token": account.refreshToken,
         }

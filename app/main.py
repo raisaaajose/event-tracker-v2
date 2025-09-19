@@ -94,7 +94,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         RequireSessionUserMiddleware,
         exempt_paths=(
+            "/",
             "/auth/",
+            "/health",
+            "/ping",
             "/docs",
             "/redoc",
             "/openapi.json",

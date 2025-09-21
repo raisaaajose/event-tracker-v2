@@ -2,6 +2,10 @@ from typing import Set, List, Dict, Tuple
 import re
 import dateparser
 from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 NON_EVENT_KEYWORDS: Set[str] = {
     "congratulations", "bus fare", "birthday"
@@ -188,8 +192,8 @@ def contains_date_or_time(text: str, nlp_model) -> Tuple[bool, Tuple[List[str], 
                     break
                     
             except Exception:
+                logger.error("no date or time found")
                 
-                continue
         
         
         if not has_future_or_present_date:

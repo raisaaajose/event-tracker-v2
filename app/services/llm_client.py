@@ -359,13 +359,23 @@ EMAILS:{emails_text}"""
         for event_data in extracted_events_data:
             if event_data.get('relevant_interests'):
                 try:
+                    start_dt_str = event_data.get('start_datetime')
+                    end_dt_str = event_data.get('end_datetime', start_dt_str)
+                    if not start_dt_str:
+                        logger.error(f"Missing start_datetime in event_data: {event_data}")
+                        continue
+                    # Defensive: if end_dt_str is None, use start_dt_str
+                    if not end_dt_str:
+                        end_dt_str = start_dt_str
+                    start_time = datetime.fromisoformat(start_dt_str.replace('Z', '+00:00')) if start_dt_str else None
+                    end_time = datetime.fromisoformat(end_dt_str.replace('Z', '+00:00')) if end_dt_str else None
                     proposed_event = ProposedEvent(
                         source_message_id=event_data.get('source_message_id'),
                         title=event_data.get('title', 'Untitled Event'),
                         description=event_data.get('summary', ''),
                         location=event_data.get('location', 'Online'),
-                        start_time=datetime.fromisoformat(event_data.get('start_datetime').replace('Z', '+00:00')),
-                        end_time=datetime.fromisoformat(event_data.get('end_datetime', event_data.get('start_datetime')).replace('Z', '+00:00')),
+                        start_time=start_time,
+                        end_time=end_time,
                         link=event_data.get('link'),
                         relevant_interests=event_data.get('relevant_interests', [])
                     )

@@ -142,7 +142,6 @@ def contains_date_or_time(text: str, nlp_model) -> Tuple[bool, Tuple[List[str], 
     date_ents = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
     time_ents = [ent.text for ent in doc.ents if ent.label_ == "TIME"]
     
-    import re
     text_lower = text.lower()
     
     time_patterns = [

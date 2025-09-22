@@ -190,8 +190,8 @@ def contains_date_or_time(text: str, nlp_model) -> Tuple[bool, Tuple[List[str], 
                     has_future_or_present_date = True
                     break
                     
-            except Exception:
-                logger.error("no date or time found")
+            except Exception as e:
+                logger.error(f"Failed to parse date string: '{date_str}'. Exception: {e}")
                 
         
         

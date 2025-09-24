@@ -377,7 +377,6 @@ EMAILS:{emails_text}"""
                         start_time=start_time,
                         end_time=end_time,
                         link=event_data.get('link'),
-                        relevant_interests=event_data.get('relevant_interests', [])
                     )
                     proposed_events.append(proposed_event)
                     logger.info(f"Successfully processed event: {proposed_event.title}")

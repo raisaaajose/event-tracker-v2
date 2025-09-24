@@ -168,15 +168,24 @@ async def google_callback(request: Request):
             )
 
         if is_new_user:
-            await job_queue.put(
-                {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+            # Only start syncing if the user already has at least one interest (or custom interest)
+            user_interests = await db.interest.find_many(
+                where={"users": {"some": {"userId": user_id}}}, take=1
             )
-
-            import asyncio
-
-            asyncio.create_task(
-                schedule_periodic_sync(user_id, interval_seconds=3600, max_results=10)
+            user_custom = await db.custominterest.find_many(
+                where={"userId": user_id}, take=1
             )
+            has_interests = bool(user_interests or user_custom)
+            if has_interests:
+                await job_queue.put(
+                    {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+                )
+                import asyncio
+                asyncio.create_task(
+                    schedule_periodic_sync(
+                        user_id, interval_seconds=3600, max_results=10
+                    )
+                )
 
         import os
 

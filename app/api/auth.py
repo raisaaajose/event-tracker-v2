@@ -181,6 +181,7 @@ async def google_callback(request: Request):
                     {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
                 )
                 import asyncio
+
                 asyncio.create_task(
                     schedule_periodic_sync(
                         user_id, interval_seconds=3600, max_results=10

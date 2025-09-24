@@ -88,10 +88,9 @@ async def delete_my_custom_interest(
 )
 async def sync_after_interest_update(user_id: str = Depends(get_current_user_id)):
     from app.services.queue import job_queue
+
     # Enqueue a single immediate sync
-    await job_queue.put({
-        "type": "sync_inbox_once",
-        "user_id": user_id,
-        "max_results": 10
-    })
+    await job_queue.put(
+        {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+    )
     return StatusResponse()

@@ -11,7 +11,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from app.services.ml_utils import _filter_stats_
+from app.services.ml_utils import filter_stats
 from app.model.llm import (
     LLMExtractionInput,
     LLMExtractionOutput,
@@ -92,7 +92,7 @@ class AsyncEventAgent:
         def _filter_sync():
             email_body_lower = email_body.lower()
             email_title_lower = email_title.lower()
-            stats = _filter_stats_(email_body_lower, email_title_lower, self.nlp)
+            stats = filter_stats(email_body_lower, email_title_lower, self.nlp)
             return {
                 "passed": stats["final_decision"],
                 "confidence": stats["total_score"],

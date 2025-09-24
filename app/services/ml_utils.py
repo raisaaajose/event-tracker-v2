@@ -177,7 +177,7 @@ def contains_date_or_time(
     return (True, (date_ents, time_ents))
 
 
-def _filter_stats_(email_body_lower: str, email_title_lower: str, nlp_model) -> Dict:
+def filter_stats(email_body_lower: str, email_title_lower: str, nlp_model) -> Dict:
     """
     Keyword filtering with detailed scoring
     Returns: Dictionary with analysis results

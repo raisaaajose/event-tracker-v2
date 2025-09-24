@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from http import HTTPStatus
-from typing import Optional, Any
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse

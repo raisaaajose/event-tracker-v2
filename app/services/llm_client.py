@@ -7,7 +7,6 @@ import os
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 import asyncio
-from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential, retry_if_exception
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
@@ -82,7 +81,98 @@ class AsyncEventAgent:
         """Run CPU-bound operations in thread pool"""
         loop = asyncio.get_event_loop()
         return loop.run_in_executor(self.thread_pool, func, *args, **kwargs)
+    def _execute_gemini_call(
+        self,
+        filtered_emails: List[Dict],
+        user_interests: List[str],
+        api_key: str,
+        model,
+    ) -> List[Dict]:
+        """
+        Synchronous method to execute a single, non-retrying API call to Gemini and designed to run in a thread.
+        """
+        genai.configure(api_key=api_key)
+        today_iso = datetime.now().isoformat()
 
+        emails_text = ""
+        for i, email in enumerate(filtered_emails):
+            emails_text += f"\n--- EMAIL {i + 1} (ID: {email['id']}) ---\n"
+            emails_text += f"Subject: {email['subject']}\n"
+            emails_text += f"Content: {email['content']}\n"
+
+        prompt = f"""You are an expert event parser. Extract event details from the emails below and return them as a JSON array.
+
+VALIDATION RULES:
+- Must be a real, upcoming event that someone can attend
+- Must have a specific date/time (not vague like "soon")
+- Ignore: past events, event summaries, speaker call-outs, generic announcements
+- Events must be within the next 6 months from today ({today_iso})
+- end_datetime should not exceed start_datetime by more than 7 days
+- Convert all times to 24-hour format first, then to ISO format
+
+OUTPUT FORMAT - Return ONLY a JSON array of valid events:
+[
+  {{
+    "source_message_id": "{email['id']}",
+    "title": "Official event title (max 100 chars)",
+    "location": "Event location if offline else 'Online'",
+    "summary": "2-line description of the event",
+    "link": "Most relevant URL (registration/meeting/info)",
+    "start_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS",
+    "end_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS, else same as start_datetime",
+    "relevant_interests": ["list of matched interests from: {user_interests}"],
+    "valid": true
+  }}
+]
+
+If no valid events found, return: []
+
+EMAILS:{emails_text}"""
+        
+        response_text = ""
+        try:
+            response = model.generate_content(prompt)
+            response_text = response.text
+            if not response_text:
+                logger.warning(f"Empty response from Gemini on API key ending in ...{api_key[-4:]}")
+                return []
+
+            events = json.loads(response_text)
+            logger.info(f"Gemini returned {len(events)} events for batch of {len(filtered_emails)} emails")
+            
+            if not isinstance(events, list):
+                logger.warning(f"Expected list of events, got: {type(events)}")
+                return []
+
+            valid_events = []
+            for event in events:
+                if not isinstance(event, dict) or not event.get("valid", False):
+                    continue
+                start_datetime = event.get("start_datetime")
+                if not start_datetime:
+                    continue
+                try:
+                    parsed_dt = datetime.fromisoformat(start_datetime.replace("Z", "+00:00"))
+                    if parsed_dt <= datetime.now():
+                        continue
+                except ValueError:
+                    continue
+                if not event.get("end_datetime"):
+                    event["end_datetime"] = start_datetime
+                valid_events.append(event)
+            
+            logger.info(f"{len(valid_events)} valid events after post-processing filters.")
+            return valid_events
+
+        except (json.JSONDecodeError, google.api_core.exceptions.GoogleAPIError) as e:
+            logger.warning(f"API call failed for key ...{api_key[-4:]}: {e}. This may trigger a retry.")
+            if isinstance(e, json.JSONDecodeError):
+                 logger.error(f"--- RAW GEMINI RESPONSE ---:\n{response_text}\n--- END RAW RESPONSE ---")
+            raise e
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during Gemini call: {e}")
+            raise e
+    
     async def _filter_layer_1_async(
         self, email_title: str, email_body: str
     ) -> Dict[str, Any]:
@@ -216,9 +306,8 @@ class AsyncEventAgent:
             return []
 
         tasks = []
-        for i, batch in enumerate(filtered_emails_batches):
-            api_key, model = self.models[i % len(self.models)]
-            task = self._process_gemini_batch(batch, user_interests, api_key, model)
+        for batch in filtered_emails_batches:
+            task = self._process_gemini_batch(batch, user_interests)
             tasks.append(task)
 
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -238,112 +327,71 @@ class AsyncEventAgent:
         self,
         filtered_emails: List[Dict],
         user_interests: List[str],
-        api_key: str,
-        model,
     ) -> List[Dict]:
-        """Process a single batch through Gemini API"""
-        @retry(
-            stop=stop_after_attempt(20),  
-            wait=wait_exponential(multiplier=5, min=10, max=120), 
-            retry=retry_if_exception(
-    lambda e: isinstance(e, json.JSONDecodeError) or 
-              (isinstance(e, google.api_core.exceptions.GoogleAPIError) and e.code == 429)
-),
-            
-            reraise=True 
-        )
-        def _call_gemini_sync():
-            genai.configure(api_key=api_key)
+        """
+        Process a single batch through Gemini API with rotational retry logic.
+        Each available API key is tried up to 3 times.
+        """
 
-            today_iso = datetime.now().isoformat()
+        max_retry_cycles = 5 
+        total_cycles = 1 + max_retry_cycles 
+        wait_between_cycles_seconds = 60
 
-            emails_text = ""
-            for i, email in enumerate(filtered_emails):
-                emails_text += f"\n--- EMAIL {i + 1} (ID: {email['id']}) ---\n"
-                emails_text += f"Subject: {email['subject']}\n"
-                emails_text += f"Content: {email['content']}\n"
+        last_exception = None
 
-            prompt = f"""You are an expert event parser. Extract event details from the emails below and return them as a JSON array.
+        for cycle in range(total_cycles):
+            if cycle > 0:
+                logger.warning(
+                    f"Starting retry cycle {cycle}/{max_retry_cycles} for batch after waiting "
+                    f"{wait_between_cycles_seconds} seconds."
+                )
+            else:
+                logger.info("Starting initial attempt cycle for batch.")
 
-VALIDATION RULES:
-- Must be a real, upcoming event that someone can attend
-- Must have a specific date/time (not vague like "soon")
-- Ignore: past events, event summaries, speaker call-outs, generic announcements
-- Events must be within the next 6 months from today ({today_iso})
-- end_datetime should not exceed start_datetime by more than 7 days
-- Convert all times to 24-hour format first, then to ISO format
+            max_attempts_per_key = 3
+            num_keys = len(self.models)
+            total_rotational_attempts = num_keys * max_attempts_per_key
 
-OUTPUT FORMAT - Return ONLY a JSON array of valid events:
-[
-  {{
-    "source_message_id": {email['id']},
-    "title": "Official event title (max 100 chars)",
-    "location": "Event location if offline else 'Online'",
-    "summary": "2-line description of the event",
-    "link": "Most relevant URL (registration/meeting/info)",
-    "start_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS",
-    "end_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS, else same as start_datetime",
-    "relevant_interests": ["list of matched interests from: {user_interests}"],
-    "valid": true
-  }}
-]]
-
-If no valid events found, return: []
-
-EMAILS:{emails_text}"""
-            response_text = ""
-            try:
-                response = model.generate_content(prompt)
-                response_text = response.text
-                if not response.text:
-                    logger.warning("Empty response from Gemini")
-                    return []
-
-                events = json.loads(response.text)
-                logger.info(f"Gemini returned {len(events)} events for batch of {len(filtered_emails)} emails")
+            for attempt in range(total_rotational_attempts):
+                key_index = attempt % num_keys
+                api_key, model = self.models[key_index]
+                key_display = f"...{api_key[-4:]}"
                 
-                if not isinstance(events, list):
-                    logger.warning(f"Expected list of events, got: {type(events)}")
-                    return []
+                logger.info(
+                    f"Cycle {cycle + 1}, Rotational Attempt {attempt + 1}/{total_rotational_attempts}, "
+                    f"using API key index {key_index} ({key_display})."
+                )
 
-                valid_events = []
-                for event in events:
-                    if not isinstance(event, dict) or not event.get("valid", False):
-                        continue
+                try:
+                    result = await self._run_in_thread(
+                        self._execute_gemini_call,
+                        filtered_emails,
+                        user_interests,
+                        api_key,
+                        model
+                    )
+                    logger.info(f"Successfully processed batch in cycle {cycle + 1}.")
+                    return result  
 
-                    start_datetime = event.get("start_datetime")
-                    if not start_datetime:
-                        continue
-
-                    try:
-                        parsed_dt = datetime.fromisoformat(
-                            start_datetime.replace("Z", "+00:00")
-                        )
-                        if parsed_dt <= datetime.now():
-                            continue
-                    except ValueError:
-                        continue
-
-                    if not event.get("end_datetime"):
-                        event["end_datetime"] = start_datetime
-
-                    valid_events.append(event)
-                logger.info(f"{len(valid_events)} valid events after post-processing filters.")
-                return valid_events
-
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Gemini response as JSON: {e}")
-                logger.error(f"--- RAW GEMINI RESPONSE ---:\n{response_text}\n--- END RAW RESPONSE ---")
-                raise e
-            except google.api_core.exceptions.GoogleAPIError as e:
-                logger.warning(f"Google API error encountered: {e}. Will retry if applicable.")
-                raise e
-            except Exception as e:
-                logger.error(f"Gemini API call failed unexpectedly: {e}")
-                raise e
-
-        return await self._run_in_thread(_call_gemini_sync)
-
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(
+                        f"Rotational attempt {attempt + 1} failed. Retrying with next key..."
+                    )
+                    await asyncio.sleep(2)
+            if cycle < total_cycles - 1:
+                logger.warning(
+                    f"Full attempt cycle {cycle + 1} failed. Waiting {wait_between_cycles_seconds} "
+                    "seconds before the next retry cycle."
+                )
+                await asyncio.sleep(wait_between_cycles_seconds)
+            
+        logger.error(
+            f"All {total_cycles} attempt cycles failed for the batch. Last known error: {last_exception}"
+        )
+        if last_exception:
+            raise last_exception
+        raise Exception("All Gemini API attempts and retries failed for the batch.")
     def _chunk_emails(
         self, emails: List[Dict], chunk_size: int = 10
     ) -> List[List[Dict]]:
@@ -450,7 +498,7 @@ EMAILS:{emails_text}"""
 
 
 async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutput:
-    """Async version of event extraction with parallel processing"""
+    """Async extraction with parallel processing"""
     try:
         async with AsyncEventAgent(max_workers=4) as agent:
             all_interests = payload.interests + payload.custom_interests
@@ -460,7 +508,7 @@ async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutp
             logger.info(
                 f"Extracted {len(extracted_events)} events from {len(payload.emails)} emails"
             )
-            logger.info(f"number of events extracted: {len(extracted_events)}")
+            logger.info(f"Number of events extracted: {len(extracted_events)}")
             return LLMExtractionOutput(events=extracted_events)
 
     except Exception as e:
@@ -469,5 +517,5 @@ async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutp
 
 
 async def extract_events(payload: LLMExtractionInput) -> LLMExtractionOutput:
-    """Main entry point - now async optimized"""
+    """Main entry point"""
     return await extract_events_async(payload)

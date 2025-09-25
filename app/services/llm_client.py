@@ -1,22 +1,26 @@
 from __future__ import annotations
-import spacy
-from sentence_transformers import SentenceTransformer, util
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
+import google.api_core.exceptions
 import json
 import os
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 import asyncio
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential, retry_if_exception
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from app.services.ml_utils import filter_stats
 from app.model.llm import (
     LLMExtractionInput,
     LLMExtractionOutput,
     ProposedEvent,
     EmailMessage,
+)
+
+from app.constants.constants import (
+    EMAIL_FOOTER_KEYWORD,
+    NON_EVENT_KEYWORDS,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -25,20 +29,17 @@ logger = logging.getLogger(__name__)
 
 class AsyncEventAgent:
     def __init__(self, max_workers: int = 4):
-        self.nlp = spacy.load("en_core_web_sm")
-        self.st_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.max_workers = max_workers
         self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
 
-        self.datetime_patterns = [
-            r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-            r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\b",
-            r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
-            r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b",
-            r"\btomorrow\b|\bnext\s+week\b|\bthis\s+(?:week|month)\b",
-        ]
+        # self.datetime_patterns = [
+        #     r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        #     r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\b",
+        #     r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+        #     r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b",
+        #     r"\btomorrow\b|\bnext\s+week\b|\bthis\s+(?:week|month)\b",
+        # ]
 
-        # Configure Gemini
         api_keys_str = os.environ.get("GEMINI_API_KEYS")
         if not api_keys_str:
             raise ValueError("GEMINI_API_KEYS environment variable not set or empty")
@@ -49,7 +50,6 @@ class AsyncEventAgent:
         if not self.api_keys:
             raise ValueError("No valid Gemini API keys found.")
 
-        # Initialize multiple models for parallel requests
         self.models = []
         for i, api_key in enumerate(self.api_keys):
             genai.configure(api_key=api_key)
@@ -86,108 +86,90 @@ class AsyncEventAgent:
     async def _filter_layer_1_async(
         self, email_title: str, email_body: str
     ) -> Dict[str, Any]:
-        """Async version of Layer 1 filtering"""
+        """Async Layer 1 filtering"""
 
-        # Run the CPU-intensive NLP processing in a thread
         def _filter_sync():
             email_body_lower = email_body.lower()
             email_title_lower = email_title.lower()
-            stats = filter_stats(email_body_lower, email_title_lower, self.nlp)
+            footer_present= EMAIL_FOOTER_KEYWORD in email_body_lower
+            keyword_present= any(kw.lower() in email_body_lower for kw in NON_EVENT_KEYWORDS)
+            
+            final_decision= footer_present and not keyword_present
+            
+            reasons = []
+            if footer_present:
+                reasons.append("Email contains footer text.")
+            if keyword_present:
+                found_keywords = [kw for kw in NON_EVENT_KEYWORDS if kw.lower() in email_body_lower]
+                reasons.append(f"Email contains non-event keyword(s): {', '.join(found_keywords)}.")
+            
             return {
-                "passed": stats["final_decision"],
-                "confidence": stats["total_score"],
-                "reasons": stats["reasons"],
-                "datetime_info": stats["datetime_filter"],
+                "passed": final_decision,
+                "reasons": reasons,
             }
 
         return await self._run_in_thread(_filter_sync)
 
-    async def _filter_layer_2_async(
-        self, email_body: str, user_interests: List[str]
-    ) -> Dict[str, Any]:
-        """Async version of Layer 2 filtering"""
 
-        def _semantic_filter_sync():
-            result = {"passed": False, "confidence": 0.0, "reasons": [], "scores": {}}
+    # async def _process_single_email_layers_1(
+    #     self, email: EmailMessage, user_interests: List[str]
+    # ) -> Optional[Dict]:
+    #     """Process a single email through layers 1  concurrently"""
+    #     email_title = email.subject or ""
+    #     email_body = email.snippet or ""
 
-            if not user_interests:
-                result.update(
-                    {
-                        "passed": True,
-                        "confidence": 0.5,
-                        "reasons": ["No user interests specified - allowing through"],
-                    }
-                )
-                return result
+    #     if not email_body and email.headers:
+    #         email_body = " ".join(
+    #             [
+    #                 h.value
+    #                 for h in email.headers
+    #                 if h.name.lower() in ["body", "content"]
+    #             ]
+    #         )
 
-            try:
-                email_embedding = self.st_model.encode(email_body)
-                interests_embeddings = self.st_model.encode(user_interests)
+    #     processing_log = {
+    #         "email_id": email.id,
+    #         "email_title": (
+    #             email_title[:100] + "..." if len(email_title) > 100 else email_title
+    #         ),
+    #         "layers": {},
+    #     }
 
-                direct_scores = util.cos_sim(email_embedding, interests_embeddings)
-                max_direct_score = float(direct_scores.max())
+    #     # Run Layer 1 and 2 concurrently
+    #     layer1_task = self._filter_layer_1_async(email_title, email_body)
+        
 
-                doc = self.nlp(email_body)
-                key_phrases = [
-                    chunk.text.lower()
-                    for chunk in doc.noun_chunks
-                    if len(chunk.text.split()) <= 3 and len(chunk.text) > 3
-                ]
+    #     layer1_result, layer2_result = await asyncio.gather(layer1_task, layer2_task)
 
-                topic_scores = []
-                if key_phrases:
-                    phrases_embedding = self.st_model.encode(key_phrases)
-                    phrase_similarity = util.cos_sim(
-                        phrases_embedding, interests_embeddings
-                    )
-                    topic_scores = phrase_similarity.max(dim=1).values.tolist()
+    #     processing_log["layers"]["layer1"] = layer1_result
+    #     processing_log["layers"]["layer2"] = layer2_result
 
-                max_topic_score = max(topic_scores) if topic_scores else 0.0
-                combined_score = max(max_direct_score, max_topic_score * 0.8)
+    #     if not layer1_result["passed"]:
+    #         logger.info(
+    #             f"Layer 1 filtered out email {email.id}: {layer1_result['reasons']}"
+    #         )
+    #         return None
 
-                base_threshold = 0.3
-                content_length_factor = min(0.2, len(email_body) / 5000)
-                interests_factor = min(0.2, len(user_interests) / 10)
-                adaptive_threshold = (
-                    base_threshold - content_length_factor - interests_factor
-                )
+    #     if not layer2_result["passed"]:
+    #         logger.info(
+    #             f"Layer 2 filtered out email {email.id}: {layer2_result['reasons']}"
+    #         )
+    #         return None
 
-                result.update(
-                    {
-                        "passed": combined_score > adaptive_threshold,
-                        "confidence": combined_score,
-                        "scores": {
-                            "direct_similarity": max_direct_score,
-                            "topic_similarity": max_topic_score,
-                            "combined_score": combined_score,
-                            "threshold_used": adaptive_threshold,
-                        },
-                        "reasons": [
-                            f"Semantic similarity: {combined_score:.3f} vs threshold {adaptive_threshold:.3f}"
-                        ],
-                    }
-                )
+    #     return {
+    #         "id": email.id,
+    #         "subject": email_title,
+    #         "content": email_body,
+    #         "processing_log": processing_log,
+    #     }
 
-            except Exception as e:
-                logger.error(f"Layer 2 filtering failed: {e}")
-                result.update(
-                    {
-                        "passed": True,
-                        "confidence": 0.5,
-                        "reasons": [
-                            f"Error in semantic analysis, allowing through: {str(e)}"
-                        ],
-                    }
-                )
-
-            return result
-
-        return await self._run_in_thread(_semantic_filter_sync)
-
-    async def _process_single_email_layers_1_2(
-        self, email: EmailMessage, user_interests: List[str]
+    async def _process_single_email_layer_1(
+        self, email: EmailMessage
     ) -> Optional[Dict]:
-        """Process a single email through layers 1 and 2 concurrently"""
+        """
+        Process a single email through Layer 1.
+        Returns data needed for Layer 3, or None if filtered out.
+        """
         email_title = email.subject or ""
         email_body = email.snippet or ""
 
@@ -208,32 +190,22 @@ class AsyncEventAgent:
             "layers": {},
         }
 
-        # Run Layer 1 and 2 concurrently
         layer1_task = self._filter_layer_1_async(email_title, email_body)
-        layer2_task = self._filter_layer_2_async(email_body, user_interests)
-
-        layer1_result, layer2_result = await asyncio.gather(layer1_task, layer2_task)
+        layer1_result = await layer1_task 
 
         processing_log["layers"]["layer1"] = layer1_result
-        processing_log["layers"]["layer2"] = layer2_result
 
         if not layer1_result["passed"]:
             logger.info(
                 f"Layer 1 filtered out email {email.id}: {layer1_result['reasons']}"
             )
-            return None
-
-        if not layer2_result["passed"]:
-            logger.info(
-                f"Layer 2 filtered out email {email.id}: {layer2_result['reasons']}"
-            )
-            return None
+            return None 
 
         return {
             "id": email.id,
             "subject": email_title,
             "content": email_body,
-            "processing_log": processing_log,
+            "processing_log": processing_log, 
         }
 
     async def _filter_layer_3_batch_async(
@@ -243,28 +215,15 @@ class AsyncEventAgent:
         if not filtered_emails_batches:
             return []
 
-        # Create tasks for each batch with different API keys
         tasks = []
         for i, batch in enumerate(filtered_emails_batches):
             api_key, model = self.models[i % len(self.models)]
             task = self._process_gemini_batch(batch, user_interests, api_key, model)
             tasks.append(task)
 
-        # Process all batches concurrently (or sequentially if only 1 API key)
-        if len(self.models) == 1:
-            # With single API key, process batches sequentially to avoid rate limits
-            batch_results = []
-            for task in tasks:
-                try:
-                    result = await task
-                    batch_results.append(result)
-                except Exception as e:
-                    batch_results.append(e)
-        else:
-            # With multiple API keys, process batches concurrently
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Combine results from all batches
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"Results from batch gather (Layer 1): {batch_results}")
+        
         all_events = []
         for result in batch_results:
             if isinstance(result, Exception):
@@ -272,7 +231,7 @@ class AsyncEventAgent:
                 continue
             if isinstance(result, list):
                 all_events.extend(result)
-
+        logger.info(f"Successfully gathered {len(all_events)} potential events from Gemini.")
         return all_events
 
     async def _process_gemini_batch(
@@ -283,7 +242,16 @@ class AsyncEventAgent:
         model,
     ) -> List[Dict]:
         """Process a single batch through Gemini API"""
-
+        @retry(
+            stop=stop_after_attempt(20),  
+            wait=wait_exponential(multiplier=5, min=10, max=120), 
+            retry=retry_if_exception(
+    lambda e: isinstance(e, json.JSONDecodeError) or 
+              (isinstance(e, google.api_core.exceptions.GoogleAPIError) and e.code == 429)
+),
+            
+            reraise=True 
+        )
         def _call_gemini_sync():
             genai.configure(api_key=api_key)
 
@@ -308,7 +276,7 @@ VALIDATION RULES:
 OUTPUT FORMAT - Return ONLY a JSON array of valid events:
 [
   {{
-    "source_message_id": "EMAIL_ID_FROM_ABOVE",
+    "source_message_id": {email['id']},
     "title": "Official event title (max 100 chars)",
     "location": "Event location if offline else 'Online'",
     "summary": "2-line description of the event",
@@ -316,7 +284,6 @@ OUTPUT FORMAT - Return ONLY a JSON array of valid events:
     "start_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS",
     "end_datetime": "ISO 8601 format: YYYY-MM-DDTHH:MM:SS, else same as start_datetime",
     "relevant_interests": ["list of matched interests from: {user_interests}"],
-    "confidence": 0.95,
     "valid": true
   }}
 ]]
@@ -324,21 +291,21 @@ OUTPUT FORMAT - Return ONLY a JSON array of valid events:
 If no valid events found, return: []
 
 EMAILS:{emails_text}"""
-
+            response_text = ""
             try:
                 response = model.generate_content(prompt)
-
+                response_text = response.text
                 if not response.text:
                     logger.warning("Empty response from Gemini")
                     return []
 
                 events = json.loads(response.text)
-
+                logger.info(f"Gemini returned {len(events)} events for batch of {len(filtered_emails)} emails")
+                
                 if not isinstance(events, list):
                     logger.warning(f"Expected list of events, got: {type(events)}")
                     return []
 
-                # Validate and filter events
                 valid_events = []
                 for event in events:
                     if not isinstance(event, dict) or not event.get("valid", False):
@@ -361,15 +328,19 @@ EMAILS:{emails_text}"""
                         event["end_datetime"] = start_datetime
 
                     valid_events.append(event)
-
+                logger.info(f"{len(valid_events)} valid events after post-processing filters.")
                 return valid_events
 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse Gemini response as JSON: {e}")
-                return []
+                logger.error(f"--- RAW GEMINI RESPONSE ---:\n{response_text}\n--- END RAW RESPONSE ---")
+                raise e
+            except google.api_core.exceptions.GoogleAPIError as e:
+                logger.warning(f"Google API error encountered: {e}. Will retry if applicable.")
+                raise e
             except Exception as e:
-                logger.error(f"Gemini API call failed: {e}")
-                return []
+                logger.error(f"Gemini API call failed unexpectedly: {e}")
+                raise e
 
         return await self._run_in_thread(_call_gemini_sync)
 
@@ -385,103 +356,99 @@ EMAILS:{emails_text}"""
     async def process_emails_batch_async(
         self, emails: List[EmailMessage], user_interests: List[str]
     ) -> List[ProposedEvent]:
-        """Async version of batch email processing with parallel execution"""
-        logger.info(f"Starting async batch processing of {len(emails)} emails")
+        """Async batch email processing with parallel execution"""
+        logger.info(f"Starting batch processing of {len(emails)} emails")
 
-        # Process Layer 1 & 2 for all emails concurrently
-        email_tasks = [
-            self._process_single_email_layers_1_2(email, user_interests)
-            for email in emails
+        layer1_tasks = [
+            self._process_single_email_layer_1(email) for email in emails
         ]
+        batch_size = min(10, len(layer1_tasks))
+        filtered_emails_for_layer3 = []
 
-        # Use asyncio.gather with batching to avoid overwhelming the system
-        batch_size = min(20, len(email_tasks))  # Process in batches of 20
-        filtered_emails = []
+        logger.info(f"Starting batch processing of Layer 1 tasks with batch size: {batch_size}")
 
-        for i in range(0, len(email_tasks), batch_size):
-            batch_tasks = email_tasks[i : i + batch_size]
-            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        for i in range(0, len(layer1_tasks), batch_size):
+            current_batch_tasks = layer1_tasks[i : i + batch_size]
+            logger.info(f"Gathering results for Layer 1 batch {i//batch_size + 1} with {len(current_batch_tasks)} tasks.")
 
+            batch_results = await asyncio.gather(*current_batch_tasks, return_exceptions=True)
+
+            logger.info(f"Number of results in current Layer 1 batch: {len(batch_results)}")
             for result in batch_results:
                 if isinstance(result, Exception):
-                    logger.error(f"Email processing failed: {result}")
+                    logger.error(f"Layer 1 processing failed for a task: {result}", exc_info=True)
                 elif result is not None:
-                    filtered_emails.append(result)
+                    filtered_emails_for_layer3.append(result)
+                else:
+                    logger.debug("Received None result from a Layer 1 task (filtered out).")
 
-        logger.info(
-            f"After Layer 1&2 filtering: {len(filtered_emails)} emails remaining"
-        )
+        logger.info(f"After Layer 1 filtering: {len(filtered_emails_for_layer3)} emails remaining for Layer 3.")
 
-        if not filtered_emails:
+        if not filtered_emails_for_layer3:
+            logger.warning("No emails remaining after Layer 1 filtering. Skipping Layer 3.")
             return []
 
-        # Chunk emails for parallel LLM processing
-        # Handle case where there's only 1 API key by ensuring at least 1 email per chunk
         num_models = len(self.models)
         if num_models == 0:
-            logger.error("No Gemini models available!")
+            logger.error(f"No Gemini models available!")
             return []
         elif num_models == 1:
-            # With single API key, use smaller chunks to avoid overwhelming the API
-            chunk_size = min(10, max(1, len(filtered_emails)))
+            chunk_size = min(10, max(1, len(filtered_emails_for_layer3)))
             logger.info(
-                f"Single API key: processing {len(filtered_emails)} emails in chunks of {chunk_size}"
+                f"Single API key: processing {len(filtered_emails_for_layer3)} emails in chunks of {chunk_size}"
             )
         else:
-            # With multiple API keys, distribute emails across models
-            chunk_size = max(1, len(filtered_emails) // num_models + 1)
-            chunk_size = min(10, chunk_size)  # Cap at 10 emails per chunk
+            chunk_size = max(1, len(filtered_emails_for_layer3) // num_models + 1)
+            chunk_size = min(10, chunk_size)
             logger.info(
-                f"Multiple API keys: processing {len(filtered_emails)} emails across {num_models} models"
+                f"Multiple API keys: processing {len(filtered_emails_for_layer3)} emails across {num_models} models"
             )
 
-        email_chunks = self._chunk_emails(filtered_emails, chunk_size)
+        email_chunks = self._chunk_emails(filtered_emails_for_layer3, chunk_size)
+        logger.info(f"Prepared {len(email_chunks)} chunks for Layer 3 processing.")
 
-        # Process chunks through Layer 3 in parallel
         extracted_events_data = await self._filter_layer_3_batch_async(
             email_chunks, user_interests
         )
-
-        # Convert to ProposedEvent objects
+        
         proposed_events = []
+        logger.info(f"Extracted event data from Gemini: {extracted_events_data}")
         for event_data in extracted_events_data:
-            if event_data.get("relevant_interests"):
-                try:
-                    start_dt_str = event_data.get("start_datetime")
-                    end_dt_str = event_data.get("end_datetime", start_dt_str)
-                    if not start_dt_str:
-                        logger.error(
-                            f"Missing start_datetime in event_data: {event_data}"
-                        )
-                        continue
-                    if not end_dt_str:
-                        end_dt_str = start_dt_str
-                    # Parse datetimes (guaranteed non-empty here to satisfy type checker)
-                    start_time = datetime.fromisoformat(
-                        start_dt_str.replace("Z", "+00:00")
-                    )
-                    end_time = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00"))
-                    proposed_event = ProposedEvent(
-                        source_message_id=event_data.get("source_message_id"),
-                        title=event_data.get("title", "Untitled Event"),
-                        description=event_data.get("summary", ""),
-                        location=event_data.get("location", "Online"),
-                        start_time=start_time,
-                        end_time=end_time,
-                        link=event_data.get("link"),
-                    )
-                    proposed_events.append(proposed_event)
-                    logger.info(f"Successfully processed event: {proposed_event.title}")
-                except Exception as e:
-                    logger.error(
-                        f"Failed to create ProposedEvent from data {event_data}: {e}"
-                    )
+            try:
+                start_dt_str = event_data.get("start_datetime")
+                end_dt_str = event_data.get("end_datetime", start_dt_str)
+                
+                if not start_dt_str:
+                    logger.error(f"Gemini event missing 'start_datetime': {event_data}")
+                    continue
+                if not end_dt_str: 
+                    end_dt_str = start_dt_str
 
-        logger.info(f"Final result: {len(proposed_events)} events extracted from batch")
+                start_time = datetime.fromisoformat(
+                    start_dt_str.replace("Z", "+00:00")
+                )
+                end_time = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00"))
+                
+                proposed_event = ProposedEvent(
+                    source_message_id=event_data.get("source_message_id"),
+                    title=event_data.get("title", "Untitled Event"),
+                    description=event_data.get("summary", ""),
+                    location=event_data.get("location", "Online"),
+                    start_time=start_time,
+                    end_time=end_time,
+                    link=event_data.get("link"),
+                )
+                proposed_events.append(proposed_event)
+                logger.info(f"Successfully created ProposedEvent: '{proposed_event.title}'")
+            except Exception as e:
+                logger.error(
+                    f"Failed to create ProposedEvent from Gemini data {event_data}: {e}", exc_info=True
+                )
+        
+        logger.info(f"Final result: {len(proposed_events)} events extracted.")
         return proposed_events
 
 
-# Updated main extraction function
 async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutput:
     """Async version of event extraction with parallel processing"""
     try:
@@ -493,6 +460,7 @@ async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutp
             logger.info(
                 f"Extracted {len(extracted_events)} events from {len(payload.emails)} emails"
             )
+            logger.info(f"number of events extracted: {len(extracted_events)}")
             return LLMExtractionOutput(events=extracted_events)
 
     except Exception as e:
@@ -500,7 +468,6 @@ async def extract_events_async(payload: LLMExtractionInput) -> LLMExtractionOutp
         return LLMExtractionOutput(events=[])
 
 
-# Wrapper to maintain compatibility with existing sync code
 async def extract_events(payload: LLMExtractionInput) -> LLMExtractionOutput:
     """Main entry point - now async optimized"""
     return await extract_events_async(payload)

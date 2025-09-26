@@ -195,10 +195,12 @@ EMAILS:{emails_text}"""
             email_body_lower = email_body.lower()
             email_title_lower = email_title.lower()
             # footer_present= EMAIL_FOOTER_KEYWORD in email_body_lower
-            keyword_present= any(kw.lower() in email_body_lower for kw in NON_EVENT_KEYWORDS)
-            
-            final_decision= not keyword_present
-            
+            keyword_present = any(
+                kw.lower() in email_body_lower for kw in NON_EVENT_KEYWORDS
+            )
+
+            final_decision = not keyword_present
+
             reasons = []
             # if footer_present:
             #     reasons.append("Email contains footer text.")

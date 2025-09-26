@@ -20,6 +20,14 @@ async def lifespan(app):
         interval = int(os.getenv("EMAIL_SYNC_INTERVAL_SECONDS", "3600"))
         accounts = await db.googleaccount.find_many()
         for acc in accounts:
+            user_interests = await db.userinterest.find_many(
+                where={"userId": acc.userId}
+            )
+            custom = await db.custominterest.find_many(where={"userId": acc.userId})
+            has_interests = bool(user_interests or custom)
+            if not has_interests:
+                continue
+
             await job_queue.put(
                 {"type": "sync_inbox_once", "user_id": acc.userId, "max_results": 10}
             )

@@ -75,3 +75,22 @@ async def delete_my_custom_interest(
 ):
     await svc.delete_custom_interest(user_id, custom_id)
     return StatusResponse()
+
+
+@router.post(
+    "/sync",
+    response_model=StatusResponse,
+    summary="Trigger interest-based inbox sync",
+    description=(
+        "Manually enqueue an email sync job after updating interests. "
+        "This avoids multiple automatic syncs while the user batches changes."
+    ),
+)
+async def sync_after_interest_update(user_id: str = Depends(get_current_user_id)):
+    from app.services.queue import job_queue
+
+    # Enqueue a single immediate sync
+    await job_queue.put(
+        {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+    )
+    return StatusResponse()

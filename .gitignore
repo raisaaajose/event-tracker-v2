@@ -4,3 +4,6 @@ node_modules
 
 /generated/prisma
 __pycache__
+
+/test_data
+test.py

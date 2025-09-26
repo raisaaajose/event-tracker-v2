@@ -13,14 +13,16 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip install uv
+
 # Create app directory
 WORKDIR /app
 
 # Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
 # Install dependencies using pip
-RUN pip install -e .
+RUN uv pip sync --system uv.lock
 
 # Development stage
 FROM base AS development

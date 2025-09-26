@@ -1,9 +1,10 @@
 from datetime import datetime, timezone, timedelta
 from http import HTTPStatus
-from typing import Optional, Any
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+import httpx
 
 from app.core.db import db
 from app.services.google_oauth import oauth, GOOGLE_REDIRECT_URI
@@ -168,15 +169,24 @@ async def google_callback(request: Request):
             )
 
         if is_new_user:
-            await job_queue.put(
-                {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+            user_interests = await db.interest.find_many(
+                where={"users": {"some": {"userId": user_id}}}, take=1
             )
-
-            import asyncio
-
-            asyncio.create_task(
-                schedule_periodic_sync(user_id, interval_seconds=3600, max_results=10)
+            user_custom = await db.custominterest.find_many(
+                where={"userId": user_id}, take=1
             )
+            has_interests = bool(user_interests or user_custom)
+            if has_interests:
+                await job_queue.put(
+                    {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+                )
+                import asyncio
+
+                asyncio.create_task(
+                    schedule_periodic_sync(
+                        user_id, interval_seconds=3600, max_results=10
+                    )
+                )
 
         import os
 
@@ -204,4 +214,53 @@ async def google_callback(request: Request):
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"OAuth callback failed: {exc}",
+        )
+
+
+@router.post(
+    "/logout",
+    summary="Logout user (clear session)",
+    description=(
+        "Clears the server-side session (removing user_id). Optionally revokes the current "
+        "Google access token if revoke=true is supplied. This endpoint is idempotent."
+    ),
+    operation_id="googleLogout",
+)
+async def google_logout(
+    request: Request,
+    revoke: bool = Query(
+        False,
+        description="If true, revoke the current Google OAuth token before logout",
+    ),
+):
+    try:
+        user_id = request.session.get("user_id")
+        if not user_id:
+            return JSONResponse({"message": "Already logged out"})
+
+        if revoke:
+            account = await db.googleaccount.find_first(where={"userId": user_id})
+            if account and account.accessToken:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        await client.post(
+                            "https://oauth2.googleapis.com/revoke",
+                            data={"token": account.accessToken},
+                            headers={
+                                "Content-Type": "application/x-www-form-urlencoded"
+                            },
+                        )
+                except Exception:
+                    pass
+
+        try:
+            request.session.clear()
+        except Exception:
+            request.session["user_id"] = None
+
+        return JSONResponse({"message": "Logged out"})
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Logout failed: {exc}",
         )

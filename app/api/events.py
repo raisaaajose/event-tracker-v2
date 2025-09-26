@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
+from http import HTTPStatus
 
 from app.services import event_service as svc
-from app.model.api import EventOut
+from app.model.api import EventOut, StatusResponse
 
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -40,3 +41,19 @@ async def get_events(
         for e in items
         if e is not None
     ]
+
+
+@router.delete(
+    "/{event_id}",
+    response_model=StatusResponse,
+    summary="Delete event",
+    description="Deletes an event by ID. Returns 404 if the event doesn't exist.",
+)
+async def delete_event(event_id: str):
+    success = await svc.delete_event(event_id)
+    if not success:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f"Event with ID {event_id} not found",
+        )
+    return StatusResponse()

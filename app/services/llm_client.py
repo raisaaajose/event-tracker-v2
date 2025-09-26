@@ -194,16 +194,14 @@ EMAILS:{emails_text}"""
         def _filter_sync():
             email_body_lower = email_body.lower()
             email_title_lower = email_title.lower()
-            footer_present = EMAIL_FOOTER_KEYWORD in email_body_lower
-            keyword_present = any(
-                kw.lower() in email_body_lower for kw in NON_EVENT_KEYWORDS
-            )
-
-            final_decision = footer_present and not keyword_present
-
+            # footer_present= EMAIL_FOOTER_KEYWORD in email_body_lower
+            keyword_present= any(kw.lower() in email_body_lower for kw in NON_EVENT_KEYWORDS)
+            
+            final_decision= not keyword_present
+            
             reasons = []
-            if footer_present:
-                reasons.append("Email contains footer text.")
+            # if footer_present:
+            #     reasons.append("Email contains footer text.")
             if keyword_present:
                 found_keywords = [
                     kw for kw in NON_EVENT_KEYWORDS if kw.lower() in email_body_lower

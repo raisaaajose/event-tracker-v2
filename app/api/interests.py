@@ -87,10 +87,15 @@ async def delete_my_custom_interest(
     ),
 )
 async def sync_after_interest_update(user_id: str = Depends(get_current_user_id)):
-    from app.services.queue import job_queue
+    try:
+        from app.services.queue import job_queue
 
-    # Enqueue a single immediate sync
-    await job_queue.put(
-        {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
-    )
-    return StatusResponse()
+        # Enqueue a single immediate sync
+        await job_queue.put(
+            {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
+        )
+        return StatusResponse()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to enqueue sync job: {str(e)}"
+        )

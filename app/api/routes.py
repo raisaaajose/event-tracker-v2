@@ -29,7 +29,23 @@ async def ping():
     description="Health and readiness status for the service.",
 )
 async def health_check():
-    return {"status": "healthy", "message": "Service is running"}
+    from app.core.db import db
+
+    health_status = {
+        "status": "healthy",
+        "message": "Service is running",
+        "database": "unknown",
+    }
+
+    try:
+        await db.user.count()
+        health_status["database"] = "connected"
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["database"] = f"disconnected: {str(e)}"
+        health_status["message"] = "Database connection failed"
+
+    return health_status
 
 
 router.include_router(auth_router)

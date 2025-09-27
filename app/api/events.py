@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
 from http import HTTPStatus
 
 from app.services import event_service as svc
 from app.model.api import EventOut, StatusResponse
+from app.core.auth import get_current_user_id
 
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -23,24 +24,28 @@ async def get_events(
     offset: int | None = Query(
         default=None, ge=0, description="Items to skip from start"
     ),
+    user_id: str = Depends(get_current_user_id),
 ):
-    items = await svc.list_events(limit=limit, offset=offset)
-    return [
-        EventOut(
-            id=e.id,
-            title=e.title,
-            description=e.description,
-            location=e.location,
-            platform=e.platform,
-            link=e.link,
-            startTime=e.startTime,
-            endTime=e.endTime,
-            source=e.source,
-            sourceId=e.sourceId,
-        )
-        for e in items
-        if e is not None
-    ]
+    try:
+        items = await svc.list_events(user_id=user_id, limit=limit, offset=offset)
+        return [
+            EventOut(
+                id=e.id,
+                title=e.title,
+                description=e.description,
+                location=e.location,
+                platform=e.platform,
+                link=e.link,
+                startTime=e.startTime,
+                endTime=e.endTime,
+                source=e.source,
+                sourceId=e.sourceId,
+            )
+            for e in items
+            if e is not None
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch events: {str(e)}")
 
 
 @router.delete(
@@ -49,11 +54,16 @@ async def get_events(
     summary="Delete event",
     description="Deletes an event by ID. Returns 404 if the event doesn't exist.",
 )
-async def delete_event(event_id: str):
-    success = await svc.delete_event(event_id)
-    if not success:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail=f"Event with ID {event_id} not found",
-        )
-    return StatusResponse()
+async def delete_event(event_id: str, user_id: str = Depends(get_current_user_id)):
+    try:
+        success = await svc.delete_event(event_id, user_id)
+        if not success:
+            raise HTTPException(
+                status_code=HTTPStatus.NOT_FOUND,
+                detail=f"Event with ID {event_id} not found or not accessible to user",
+            )
+        return StatusResponse()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete event: {str(e)}")

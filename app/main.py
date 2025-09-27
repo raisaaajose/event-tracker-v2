@@ -1,4 +1,5 @@
 import os
+import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
@@ -31,6 +32,12 @@ tags_metadata = [
 
 def create_app() -> FastAPI:
     load_dotenv(override=False)
+
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     app = FastAPI(
         title="Event Tracker API",
         version="0.1.0",
@@ -80,16 +87,15 @@ def create_app() -> FastAPI:
         except Exception:
             frontend_origin = None
 
-    allow_origins = (
-        [frontend_origin]
-        if frontend_origin
-        else [
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ]
-    )
+    allow_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    if frontend_origin and frontend_origin not in allow_origins:
+        allow_origins.append(frontend_origin)
 
     app.add_middleware(
         RequireSessionUserMiddleware,

@@ -22,7 +22,7 @@ from app.constants.constants import (
     NON_EVENT_KEYWORDS,
 )
 
-logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 

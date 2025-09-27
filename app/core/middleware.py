@@ -19,12 +19,13 @@ class RequireSessionUserMiddleware(BaseHTTPMiddleware):
             if path.startswith(prefix):
                 return await call_next(request)
 
-        scope_session = (
-            request.scope.get("session") if isinstance(request.scope, dict) else None
-        )
-        user_id = (
-            scope_session.get("user_id") if isinstance(scope_session, dict) else None
-        )
+        user_id = None
+        if hasattr(request, "session"):
+            try:
+                user_id = request.session.get("user_id")
+            except Exception:
+                user_id = None
+
         if user_id:
             request.state.user_id = str(user_id)
             return await call_next(request)

@@ -92,6 +92,16 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(
+        SessionMiddleware,
+        secret_key=secret_key,
+        session_cookie=session_cookie,
+        max_age=max_age,
+        same_site=samesite_literal,
+        https_only=https_only,
+        domain=session_domain,
+        path="/",
+    )
+    app.add_middleware(
         RequireSessionUserMiddleware,
         exempt_paths=(
             "/",
@@ -103,16 +113,6 @@ def create_app() -> FastAPI:
             "/openapi.json",
             "/favicon.ico",
         ),
-    )
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=secret_key,
-        session_cookie=session_cookie,
-        max_age=max_age,
-        same_site=samesite_literal,
-        https_only=https_only,
-        domain=session_domain,
-        path="/",
     )
     app.add_middleware(
         CORSMiddleware,

@@ -195,7 +195,7 @@ async def google_callback(request: Request):
         request.session["user_id"] = user_id
 
         if frontend:
-            return RedirectResponse(url=f"{frontend}/home")
+            return RedirectResponse(url=f"{frontend}?login=success&user_id={user_id}")
 
         return JSONResponse(
             {

@@ -91,6 +91,9 @@ def create_app() -> FastAPI:
         ]
     )
 
+    if not session_domain:
+        session_domain = None
+
     app.add_middleware(
         SessionMiddleware,
         secret_key=secret_key,

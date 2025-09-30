@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from http import HTTPStatus
-from typing import Optional
+from typing import Optional, Dict, TypedDict, cast
+import os
+import logging
 
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -10,6 +12,8 @@ from app.core.db import db
 from app.services.google_oauth import oauth, GOOGLE_REDIRECT_URI
 from app.services.queue import job_queue
 from app.services.email_sync import schedule_periodic_sync
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/google", tags=["auth"])
 
@@ -34,6 +38,11 @@ def _epoch_to_datetime(ts: Optional[float]) -> Optional[datetime]:
     operation_id="googleLoginGet",
 )
 async def google_login(request: Request):
+    """Initiate Google OAuth redirect.
+
+    Uses authlib's configured google client. Adds explicit offline access + consent to
+    ensure a refresh token (first consent or when force prompt).
+    """
     try:
         google = oauth.create_client("google")
         if google is None:
@@ -49,6 +58,7 @@ async def google_login(request: Request):
             include_granted_scopes="true",
         )
     except Exception as exc:
+        logger.exception("OAuth login init failed")
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"OAuth init failed: {exc}",
@@ -65,6 +75,14 @@ async def google_login(request: Request):
     operation_id="googleCallback",
 )
 async def google_callback(request: Request):
+    """Handle Google OAuth callback, upsert user + tokens, set session, trigger sync.
+
+    Optimization goals:
+    - Single interest presence check (avoid duplicate queries)
+    - Unified token expiry derivation
+    - Conditional background scheduling for any user with interests
+    - Clear logging for observability
+    """
     try:
         google = oauth.create_client("google")
         if google is None:
@@ -72,7 +90,12 @@ async def google_callback(request: Request):
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 detail="Google OAuth client not configured",
             )
+
         token = await google.authorize_access_token(request)
+        logger.debug(
+            "Received token keys: %s",
+            list(token.keys()) if isinstance(token, dict) else type(token),
+        )
 
         userinfo = None
         try:
@@ -111,8 +134,11 @@ async def google_callback(request: Request):
                     "picture": picture,
                 }
             )
+            if user is None:
+                raise HTTPException(status_code=500, detail="Failed to create user")
+            logger.info("Created new user id=%s email=%s", user.id, email)
         else:
-            user = await db.user.update(
+            updated = await db.user.update(
                 where={"id": user.id},
                 data={
                     "email": email,
@@ -120,20 +146,17 @@ async def google_callback(request: Request):
                     "picture": picture,
                 },
             )
+            user = updated or user
+            logger.debug("Updated user id=%s", user.id)
 
-        assert user is not None
         user_id = user.id
-        user_email = user.email
-        user_name = user.name
-        user_picture = user.picture
 
         expires_at = None
         if isinstance(token, dict):
             expires_at = _epoch_to_datetime(token.get("expires_at"))
             if not expires_at:
                 try:
-                    expires_in_val = token.get("expires_in", 0) or 0
-                    expires_in = int(expires_in_val)
+                    expires_in = int(token.get("expires_in") or 0)
                     if expires_in > 0:
                         expires_at = datetime.now(timezone.utc) + timedelta(
                             seconds=expires_in
@@ -142,75 +165,103 @@ async def google_callback(request: Request):
                     expires_at = None
 
         account = await db.googleaccount.find_unique(where={"userId": user_id})
+        raw_refresh = token.get("refresh_token")
+        refresh_token = (
+            str(raw_refresh)
+            if raw_refresh
+            else (account.refreshToken if account and account.refreshToken else None)
+        )
+        base_access = str(token.get("access_token"))
+        if not base_access:
+            raise HTTPException(status_code=400, detail="Missing access token")
+
+        token_type = (
+            str(token.get("token_type"))
+            if token.get("token_type")
+            else (account.tokenType if account else None)
+        )
+        scope_val = (
+            str(token.get("scope"))
+            if token.get("scope")
+            else (account.scope if account else None)
+        )
+        id_token_val = (
+            str(token.get("id_token"))
+            if token.get("id_token")
+            else (account.idToken if account else None)
+        )
+
         if account is None:
             await db.googleaccount.create(
                 data={
                     "userId": user_id,
-                    "accessToken": str(token.get("access_token")),
-                    "refreshToken": str(token.get("refresh_token")),
+                    "accessToken": base_access,
+                    "refreshToken": refresh_token,
                     "expiresAt": expires_at,
-                    "tokenType": token.get("token_type"),
-                    "scope": token.get("scope"),
-                    "idToken": token.get("id_token"),
+                    "tokenType": token_type,
+                    "scope": scope_val,
+                    "idToken": id_token_val,
                 }
             )
+            logger.debug("Created google account record for user=%s", user_id)
         else:
             await db.googleaccount.update(
                 where={"id": account.id},
                 data={
-                    "accessToken": str(token.get("access_token")),
-                    "refreshToken": str(token.get("refresh_token"))
-                    or account.refreshToken,
+                    "accessToken": base_access,
+                    "refreshToken": refresh_token,
                     "expiresAt": expires_at,
-                    "tokenType": str(token.get("token_type")),
-                    "scope": str(token.get("scope")) or account.scope,
-                    "idToken": str(token.get("id_token")) or account.idToken,
+                    "tokenType": token_type,
+                    "scope": scope_val,
+                    "idToken": id_token_val,
                 },
             )
+            logger.debug("Updated google account token for user=%s", user_id)
 
-        if is_new_user:
-            user_interests = await db.interest.find_many(
-                where={"users": {"some": {"userId": user_id}}}, take=1
-            )
-            user_custom = await db.custominterest.find_many(
-                where={"userId": user_id}, take=1
-            )
-            has_interests = bool(user_interests or user_custom)
-            if has_interests:
+        interests_sample, custom_sample = await _fetch_interest_presence(user_id)
+        has_interests = bool(interests_sample or custom_sample)
+
+        request.session["user_id"] = user_id
+        logger.debug("Session user_id set for user=%s", user_id)
+
+        if has_interests:
+            try:
                 await job_queue.put(
                     {"type": "sync_inbox_once", "user_id": user_id, "max_results": 10}
                 )
                 import asyncio
 
+                interval = int(os.getenv("EMAIL_SYNC_INTERVAL_SECONDS", "3600"))
                 asyncio.create_task(
                     schedule_periodic_sync(
-                        user_id, interval_seconds=3600, max_results=10
+                        user_id, interval_seconds=interval, max_results=10
                     )
                 )
-
-        import os
+            except Exception:
+                logger.exception("Failed to enqueue/schedule sync for user=%s", user_id)
 
         frontend = os.environ.get("FRONTEND_URL")
-
-        request.session["user_id"] = user_id
-
         if frontend:
-            return RedirectResponse(url=f"{frontend}?login=success&user_id={user_id}")
+            target_path = "/home" if has_interests else "/interests"
+            return RedirectResponse(url=f"{frontend}{target_path}")
 
         return JSONResponse(
             {
                 "message": "Google authentication successful",
                 "user": {
                     "id": user_id,
-                    "email": user_email,
-                    "name": user_name,
-                    "picture": user_picture,
+                    "email": getattr(user, "email", None),
+                    "name": getattr(user, "name", None),
+                    "picture": getattr(user, "picture", None),
+                    "has_interests": has_interests,
+                    "is_new_user": is_new_user,
                 },
             }
         )
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("OAuth callback failed")
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"OAuth callback failed: {exc}",
@@ -264,3 +315,16 @@ async def google_logout(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"Logout failed: {exc}",
         )
+
+
+async def _fetch_interest_presence(user_id: str):
+    """Fetch a minimal sample of user interests & custom interests (at most 1 each).
+
+    Returns tuples (interests_sample, custom_sample) which are lists (len 0 or 1).
+    Keeping this separate makes it easier to unit test and potentially extend.
+    """
+    interests = await db.interest.find_many(
+        where={"users": {"some": {"userId": user_id}}}, take=1
+    )
+    custom = await db.custominterest.find_many(where={"userId": user_id}, take=1)
+    return interests, custom

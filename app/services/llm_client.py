@@ -5,7 +5,8 @@ import google.api_core.exceptions
 import json
 import os
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -51,8 +52,8 @@ class AsyncEventAgent:
 
         self.models = []
         for i, api_key in enumerate(self.api_keys):
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
+            genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+            model = genai.GenerativeModel(  # type: ignore[attr-defined]
                 model_name="gemini-2.0-flash-exp",
                 generation_config=GenerationConfig(
                     temperature=0.1,
@@ -92,7 +93,7 @@ class AsyncEventAgent:
         """
         Synchronous method to execute a single, non-retrying API call to Gemini and designed to run in a thread.
         """
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=api_key)  # type: ignore[attr-defined]
         today_iso = datetime.now().isoformat()
 
         emails_text = ""
@@ -495,6 +496,16 @@ EMAILS:{emails_text}"""
 
         proposed_events = []
         logger.info(f"Extracted event data from Gemini: {extracted_events_data}")
+
+        default_tz_name = os.getenv("DEFAULT_EVENT_TIMEZONE", "Asia/Kolkata")
+        try:
+            default_tz = ZoneInfo(default_tz_name)
+        except Exception:
+            logger.warning(
+                f"Invalid DEFAULT_EVENT_TIMEZONE='{default_tz_name}', falling back to UTC"
+            )
+            default_tz = timezone.utc
+
         for event_data in extracted_events_data:
             try:
                 start_dt_str = event_data.get("start_datetime")
@@ -508,6 +519,11 @@ EMAILS:{emails_text}"""
 
                 start_time = datetime.fromisoformat(start_dt_str.replace("Z", "+00:00"))
                 end_time = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00"))
+
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=default_tz)
+                if end_time.tzinfo is None:
+                    end_time = end_time.replace(tzinfo=default_tz)
 
                 proposed_event = ProposedEvent(
                     source_message_id=event_data.get("source_message_id"),
@@ -528,7 +544,9 @@ EMAILS:{emails_text}"""
                     exc_info=True,
                 )
 
-        logger.info(f"Final result: {len(proposed_events)} events extracted.")
+        logger.info(
+            f"Final result: {len(proposed_events)} events extracted (default tz={default_tz_name})."
+        )
         return proposed_events
 
 

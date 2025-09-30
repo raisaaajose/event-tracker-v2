@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 import httpx
+import os
 
 from app.services.google_api import get_user_google_token
 
@@ -37,6 +38,20 @@ async def create_event(
         "start": {"dateTime": _iso(start)},
         "end": {"dateTime": _iso(end or (start))},
     }
+    try:
+        reminder_minutes = int(os.getenv("CALENDAR_EVENT_REMINDER_MINUTES", "60"))
+    except ValueError:
+        reminder_minutes = 60
+    if reminder_minutes > 0:
+        body["reminders"] = {
+            "useDefault": False,
+            "overrides": [
+                {"method": "popup", "minutes": reminder_minutes},
+            ],
+        }
+    else:
+        body["reminders"] = {"useDefault": True}
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             f"{CAL_BASE}/calendars/primary/events", headers=headers, json=body

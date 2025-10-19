@@ -22,7 +22,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install dependencies using pip
-RUN uv pip sync --system uv.lock
+RUN uv pip compile --output-file requirements.txt pyproject.toml && \
+    uv pip sync --system requirements.txt
 
 # Development stage
 FROM base AS development

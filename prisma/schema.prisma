@@ -121,12 +121,13 @@ model UserEvent {
 }
 
 model CalendarSync {
-  id                 String     @id @default(cuid())
-  userId             String     @unique
-  lastProcessedDate  DateTime?  // Gmail internalDate cutoff
-  lastCalendarUpdate DateTime?
-  syncStatus         SyncStatus @default(OK)
-  errorMessage       String?
+  id                     String     @id @default(cuid())
+  userId                 String     @unique
+  lastProcessedDate      DateTime?  // Gmail internalDate cutoff
+  lastProcessedMessageId String?   // Last Gmail message ID processed
+  lastCalendarUpdate     DateTime?
+  syncStatus             SyncStatus @default(OK)
+  errorMessage           String?
 
   user               User       @relation(fields: [userId], references: [id])
 

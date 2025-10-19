@@ -19,7 +19,7 @@ class EmailMessage(BaseModel):
     to: Optional[str] = None
     date: Optional[str] = None
     internal_date: Optional[datetime] = None
-    snippet: Optional[str] = None
+    body: Optional[str] = None
     headers: List[EmailHeader] = Field(default_factory=list)
 
 

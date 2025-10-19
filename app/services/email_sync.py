@@ -48,10 +48,7 @@ async def get_message_detail(user_id: str, message_id: str) -> Dict[str, Any]:
         resp = await client.get(
             f"{GMAIL_API_BASE}/messages/{message_id}",
             headers=headers,
-            params={
-                "format": "metadata",
-                "metadataHeaders": ["subject", "from", "to", "date"],
-            },
+            params={"format": "full"},
         )
         resp.raise_for_status()
     return resp.json()
@@ -66,25 +63,84 @@ def _parse_internal_date(ms_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _extract_body(payload: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract the email body text from Gmail API payload.
+    Handles both plain text and HTML, prioritizing plain text.
+    """
+    import base64
+
+    def get_text_from_part(part: Dict[str, Any]) -> Optional[str]:
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+        data = body.get("data")
+
+        if data:
+            try:
+                return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            except Exception:
+                return None
+
+        if "parts" in part:
+            for nested_part in part["parts"]:
+                text = get_text_from_part(nested_part)
+                if text and (mime_type == "text/plain" or not mime_type):
+                    return text
+
+        return None
+
+    if "parts" in payload:
+        for part in payload["parts"]:
+            if part.get("mimeType") == "text/plain":
+                text = get_text_from_part(part)
+                if text:
+                    return text
+
+        for part in payload["parts"]:
+            text = get_text_from_part(part)
+            if text:
+                return text
+
+    body = payload.get("body", {})
+    data = body.get("data")
+    if data:
+        try:
+            return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+
+    return None
+
+
 async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
+    """
+    Process Gmail messages and queue them for LLM extraction.
+    Only processes messages that haven't been seen before.
+    """
     if not messages:
         return 0
 
+    cs = await db.calendarsync.find_unique(where={"userId": user_id})
+    last_processed_msg_id = cs.lastProcessedMessageId if cs else None
+
     email_models: List[EmailMessage] = []
     latest_internal: Optional[datetime] = None
+    latest_msg_id: Optional[str] = None
+    found_last_processed = last_processed_msg_id is None
+
     for m in messages:
         msg_id = m.get("id")
         if not msg_id:
             continue
 
-        existing = await db.event.find_first(
-            where={"sourceId": msg_id, "source": "gmail"}
-        )
-        if existing:
+        if not found_last_processed:
+            if msg_id == last_processed_msg_id:
+                found_last_processed = True
             continue
 
         detail = await get_message_detail(user_id, msg_id)
-        headers_raw = detail.get("payload", {}).get("headers", [])
+        payload = detail.get("payload", {})
+        headers_raw = payload.get("headers", [])
         headers = [
             EmailHeader(name=h.get("name", ""), value=h.get("value", ""))
             for h in headers_raw
@@ -94,10 +150,13 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
         to_addr = next((h.value for h in headers if h.name.lower() == "to"), None)
         date_hdr = next((h.value for h in headers if h.name.lower() == "date"), None)
         internal_date = _parse_internal_date(detail.get("internalDate"))
+        body = _extract_body(payload)
+
         if internal_date and (
             latest_internal is None or internal_date > latest_internal
         ):
             latest_internal = internal_date
+            latest_msg_id = msg_id
 
         email_models.append(
             EmailMessage(
@@ -106,11 +165,14 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
                 sender=sender,
                 to=to_addr,
                 date=date_hdr,
-                snippet=detail.get("snippet"),
+                body=body,
                 internal_date=internal_date,
                 headers=headers,
             )
         )
+
+    if not email_models:
+        return 0
 
     interests = await db.interest.find_many(
         where={"users": {"some": {"userId": user_id}}}
@@ -134,10 +196,11 @@ async def process_messages(user_id: str, messages: List[Dict[str, Any]]) -> int:
             "user_id": user_id,
             "payload": llm_input.model_dump(),
             "latest_internal": latest_internal.isoformat() if latest_internal else None,
+            "latest_msg_id": latest_msg_id,
         }
     )
 
-    return 0
+    return len(email_models)
 
 
 async def sync_user_inbox_once(user_id: str, max_results: int = 10) -> int:
@@ -164,6 +227,7 @@ async def handle_job(job: Dict[str, Any]) -> None:
         user_id = job["user_id"]
         payload = job.get("payload") or {}
         latest_internal_iso = job.get("latest_internal")
+        latest_msg_id = job.get("latest_msg_id")
         latest_internal = None
         if isinstance(latest_internal_iso, str):
             try:
@@ -175,35 +239,53 @@ async def handle_job(job: Dict[str, Any]) -> None:
         llm_output = await extract_events(llm_input)
 
         for ev in llm_output.events:
-            cal_ev = await create_event(
-                user_id=user_id,
-                summary=ev.title,
-                description=ev.description,
-                location=ev.location,
-                start=ev.start_time,
-                end=ev.end_time,
-            )
-            await db.event.create(
-                data={
-                    "title": ev.title,
-                    "description": ev.description,
-                    "location": ev.location,
-                    "platform": "google-calendar",
-                    "link": cal_ev.get("htmlLink"),
-                    "startTime": ev.start_time,
-                    "endTime": ev.end_time,
-                    "source": "gmail",
-                    "sourceId": ev.source_message_id,
-                    "users": {"create": [{"userId": user_id, "added": True}]},
-                }
-            )
+            if ev.source_message_id:
+                existing = await db.event.find_first(
+                    where={"sourceId": ev.source_message_id, "source": "gmail"}
+                )
+                if existing:
+                    continue
 
-        if latest_internal is not None:
+            try:
+                cal_ev = await create_event(
+                    user_id=user_id,
+                    summary=ev.title,
+                    description=ev.description,
+                    location=ev.location,
+                    start=ev.start_time,
+                    end=ev.end_time,
+                )
+                await db.event.create(
+                    data={
+                        "title": ev.title,
+                        "description": ev.description,
+                        "location": ev.location,
+                        "platform": "google-calendar",
+                        "link": cal_ev.get("htmlLink"),
+                        "startTime": ev.start_time,
+                        "endTime": ev.end_time,
+                        "source": "gmail",
+                        "sourceId": ev.source_message_id,
+                        "users": {"create": [{"userId": user_id, "added": True}]},
+                    }
+                )
+            except Exception as e:
+                print(f"Error creating event from email {ev.source_message_id}: {e}")
+                continue
+
+        if latest_internal is not None or latest_msg_id is not None:
             await db.calendarsync.upsert(
                 where={"userId": user_id},
                 data={
-                    "create": {"userId": user_id, "lastProcessedDate": latest_internal},
-                    "update": {"lastProcessedDate": latest_internal},
+                    "create": {
+                        "userId": user_id,
+                        "lastProcessedDate": latest_internal,
+                        "lastProcessedMessageId": latest_msg_id,
+                    },
+                    "update": {
+                        "lastProcessedDate": latest_internal,
+                        "lastProcessedMessageId": latest_msg_id,
+                    },
                 },
             )
 
